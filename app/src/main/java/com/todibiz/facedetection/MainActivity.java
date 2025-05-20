@@ -9,6 +9,7 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.camera.core.CameraSelector;
+import androidx.camera.core.ExperimentalGetImage;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
 import androidx.camera.core.Preview;
@@ -16,7 +17,6 @@ import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
-import androidx.lifecycle.LifecycleOwner;
 
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.mlkit.vision.common.InputImage;
@@ -30,31 +30,35 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+@ExperimentalGetImage
 public class MainActivity extends AppCompatActivity {
 
     private static final int REQUEST_CODE_PERMISSIONS = 10;
     private static final String[] REQUIRED_PERMISSIONS = new String[]{Manifest.permission.CAMERA};
 
-    private ExecutorService cameraExecutor;
     private PreviewView previewView;
+    private ExecutorService cameraExecutor;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        previewView = findViewById(R.id.previewView); // Make sure your activity_main.xml has this ID
+
+        previewView = findViewById(R.id.previewView); // Ensure your layout has this ID
+        cameraExecutor = Executors.newSingleThreadExecutor();
 
         if (allPermissionsGranted()) {
-            startCamera();
+            previewView.post(() -> {
+                startCamera(); // start only after the view is ready
+            });
         } else {
             ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS);
         }
-
-        cameraExecutor = Executors.newSingleThreadExecutor();
     }
 
     private void startCamera() {
-        ListenableFuture<ProcessCameraProvider> cameraProviderFuture = ProcessCameraProvider.getInstance(this);
+        ListenableFuture<ProcessCameraProvider> cameraProviderFuture =
+                ProcessCameraProvider.getInstance(this);
 
         cameraProviderFuture.addListener(() -> {
             try {
@@ -67,16 +71,14 @@ public class MainActivity extends AppCompatActivity {
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                         .build();
 
-                imageAnalysis.setAnalyzer(cameraExecutor, imageProxy -> {
-                    processImageProxy(imageProxy);
-                });
+                imageAnalysis.setAnalyzer(cameraExecutor, this::processImageProxy);
 
                 CameraSelector cameraSelector = new CameraSelector.Builder()
                         .requireLensFacing(CameraSelector.LENS_FACING_FRONT)
                         .build();
 
                 cameraProvider.unbindAll();
-                cameraProvider.bindToLifecycle((LifecycleOwner) this, cameraSelector, preview, imageAnalysis);
+                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
 
             } catch (ExecutionException | InterruptedException e) {
                 e.printStackTrace();
@@ -85,10 +87,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void processImageProxy(ImageProxy imageProxy) {
-        @androidx.camera.core.ExperimentalGetImage
         android.media.Image mediaImage = imageProxy.getImage();
         if (mediaImage != null) {
-            InputImage image = InputImage.fromMediaImage(mediaImage, imageProxy.getImageInfo().getRotationDegrees());
+            int rotation = imageProxy.getImageInfo().getRotationDegrees();
+
+            InputImage inputImage = InputImage.fromMediaImage(mediaImage, rotation);
 
             FaceDetectorOptions options = new FaceDetectorOptions.Builder()
                     .setPerformanceMode(FaceDetectorOptions.PERFORMANCE_MODE_FAST)
@@ -96,14 +99,14 @@ public class MainActivity extends AppCompatActivity {
 
             FaceDetector detector = FaceDetection.getClient(options);
 
-            detector.process(image)
+            detector.process(inputImage)
                     .addOnSuccessListener(faces -> {
                         if (!faces.isEmpty()) {
-                            Log.d("FACE", "Detected " + faces.size() + " face(s)");
-                            Toast.makeText(MainActivity.this, "Face Detected!", Toast.LENGTH_SHORT).show();
+                            Log.d("FaceDetection", "Detected " + faces.size() + " face(s)");
+                            Toast.makeText(this, "Face Detected!", Toast.LENGTH_SHORT).show();
                         }
                     })
-                    .addOnFailureListener(e -> e.printStackTrace())
+                    .addOnFailureListener(Throwable::printStackTrace)
                     .addOnCompleteListener(task -> imageProxy.close());
         } else {
             imageProxy.close();
@@ -122,13 +125,16 @@ public class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int requestCode,
                                            @NonNull String[] permissions,
                                            @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == REQUEST_CODE_PERMISSIONS) {
-            if (allPermissionsGranted()) {
-                startCamera();
-            } else {
-                Toast.makeText(this, "Camera permission required", Toast.LENGTH_SHORT).show();
-                finish();
-            }
+            previewView.post(() -> {
+                if (allPermissionsGranted()) {
+                    startCamera();
+                } else {
+                    ActivityCompat.requestPermissions(this, REQUIRED_PERMISSIONS, REQUEST_CODE_PERMISSIONS);
+                }
+            });
         }
     }
+
 }
